@@ -37,7 +37,7 @@ uv run unshackle --help
 ### Install unshackle as a global (per-user) tool
 
 ```bash
-uv tool install git+https://github.com/unshackle-dl/unshackle.git
+uv tool install git+git@github.com:vinefeeder/unshackle.git
 # Then run:
 uvx unshackle --help   # or just `unshackle` once PATH updated
 ```
@@ -75,7 +75,7 @@ docker run --rm -it \
 
 ```bash
 # Clone and build your own image
-git clone https://github.com/unshackle-dl/unshackle.git
+git clone git@github.com:vinefeeder/unshackle.git
 cd unshackle
 docker build -t unshackle .
 docker run --rm unshackle env check

@@ -62,23 +62,20 @@ def main(version: bool, debug: bool, log_path: Path) -> None:
         Padding(
             Group(
                 Text(
-                    r"▄• ▄▌ ▐ ▄ .▄▄ ·  ▄ .▄ ▄▄▄·  ▄▄· ▄ •▄ ▄▄▌  ▄▄▄ ." + "\n"
-                    r"█▪██▌•█▌▐█▐█ ▀. ██▪▐█▐█ ▀█ ▐█ ▌▪█▌▄▌▪██•  ▀▄.▀·" + "\n"
-                    r"█▌▐█▌▐█▐▐▌▄▀▀▀█▄██▀▐█▄█▀▀█ ██ ▄▄▐▀▀▄·██▪  ▐▀▀▪▄" + "\n"
-                    r"▐█▄█▌██▐█▌▐█▄▪▐███▌▐▀▐█ ▪▐▌▐███▌▐█.█▌▐█▌▐▌▐█▄▄▌" + "\n"
-                    r" ▀▀▀ ▀▀ █▪ ▀▀▀▀ ▀▀▀ · ▀  ▀ ·▀▀▀ ·▀  ▀.▀▀▀  ▀▀▀ ",
-                    style="ascii.art",
+                    r"  _____ _   ___     _____ _____ ____  " + "\n"
+                    r"  | ____| \ | \ \   / /_ _| ____|  _ \ " + "\n"
+                    r"  |  _| |  \| |\ \ / / | ||  _| | | | |" + "\n"
+                    r"  | |___| |\  | \ V /  | || |___| |_| |" + "\n"
+                    r"  |_____|_| \_|  \_/  |___|_____|____/ " + "\n",                                    
+                    style="ascii.art"
                 ),
-                "v 3.3.3 Copyright © 2019-2025 rlaphoenix" + f"\nv [repr.number]{__version__}[/] - unshackle",
+                r"v 3.3.3 Copyright © 2019-2025 rlaphoenix" + f"\nv [repr.number]{__version__}[/] - unshackle",
             ),
-            (1, 11, 1, 10),
-            expand=True,
+            (1, 21, 1, 20),
+            expand=True
         ),
-        justify="center",
+        justify="center"
     )
-
-    if version:
-        return
 
     if config.update_checks:
         try:

@@ -148,6 +148,7 @@ class dl:
         help="Language wanted for Video, you would use this if the video language doesn't match the audio.",
     )
     @click.option("-sl", "--s-lang", type=LANGUAGE_RANGE, default=["all"], help="Language wanted for Subtitles.")
+    @click.option("-fs", "--forced-subs", is_flag=True, default=False, help="Include forced subtitle tracks.")
     @click.option(
         "--proxy",
         type=str,
@@ -405,6 +406,7 @@ class dl:
         lang: list[str],
         v_lang: list[str],
         s_lang: list[str],
+        forced_subs: bool,
         sub_format: Optional[Subtitle.Codec],
         video_only: bool,
         audio_only: bool,
@@ -672,7 +674,8 @@ class dl:
                             self.log.error(f"There's no {s_lang} Subtitle Track...")
                             sys.exit(1)
 
-                    title.tracks.select_subtitles(lambda x: not x.forced or is_close_match(x.language, lang))
+                    if not forced_subs:
+                        title.tracks.select_subtitles(lambda x: not x.forced or is_close_match(x.language, lang))
 
                 # filter audio tracks
                 # might have no audio tracks if part of the video, e.g. transport stream hls
@@ -765,8 +768,7 @@ class dl:
                 DOWNLOAD_LICENCE_ONLY.set()
 
             try:
-                # Use transient mode to prevent display remnants
-                with Live(Padding(download_table, (1, 5)), console=console, refresh_per_second=5, transient=True):
+                with Live(Padding(download_table, (1, 5)), console=console, refresh_per_second=5):
                     with ThreadPoolExecutor(downloads) as pool:
                         for download in futures.as_completed(
                             (
@@ -912,6 +914,31 @@ class dl:
                     if font_count:
                         self.log.info(f"Attached {font_count} fonts for the Subtitles")
 
+                # Handle DRM decryption BEFORE repacking (must decrypt first!)
+                service_name = service.__class__.__name__.upper()
+                decryption_method = config.decryption_map.get(service_name, config.decryption)
+                use_mp4decrypt = decryption_method.lower() == "mp4decrypt"
+
+                if use_mp4decrypt:
+                    decrypt_tool = "mp4decrypt"
+                else:
+                    decrypt_tool = "Shaka Packager"
+
+                drm_tracks = [track for track in title.tracks if track.drm]
+                if drm_tracks:
+                    with console.status(f"Decrypting tracks with {decrypt_tool}..."):
+                        has_decrypted = False
+                        for track in drm_tracks:
+                            for drm in track.drm:
+                                if hasattr(drm, "decrypt"):
+                                    drm.decrypt(track.path, use_mp4decrypt=use_mp4decrypt)
+                                    has_decrypted = True
+                                    events.emit(events.Types.TRACK_REPACKED, track=track)
+                                    break
+                        if has_decrypted:
+                            self.log.info(f"Decrypted tracks with {decrypt_tool}")
+
+                # Now repack the decrypted tracks
                 with console.status("Repackaging tracks with FFMPEG..."):
                     has_repacked = False
                     for track in title.tracks:
@@ -1010,7 +1037,7 @@ class dl:
 
                             multiplex_tasks.append((task_id, task_tracks))
 
-                    with Live(Padding(progress, (0, 5, 1, 5)), console=console, transient=True):
+                    with Live(Padding(progress, (0, 5, 1, 5)), console=console):
                         for task_id, task_tracks in multiplex_tasks:
                             progress.start_task(task_id)  # TODO: Needed?
                             muxed_path, return_code, errors = task_tracks.mux(

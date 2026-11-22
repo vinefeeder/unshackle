@@ -1,0 +1,8 @@
+key_spec: "302a6a0d70a7e9b967f91d39fef3e387816e3095925ae4537bce96063311f9c5"
+app_secret: "66e42822f2afacd9"
+
+endpoints:
+  base_url: https://pluto.tv
+  episodes: http://api.pluto.tv/v2/episodes/{episode_id}/clips.json
+  wv: https://service-concierge.clusters.pluto.tv/v1/wv
+  pr: https://service-concierge.clusters.pluto.tv/v1/pr

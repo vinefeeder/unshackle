@@ -98,9 +98,7 @@ class PLUTO(Service):
     ) -> None:
         super().authenticate(cookies, credential)
         if self.web_mpd:
-            token = os.getenv("PLUTO_WEB_BEARER_TOKEN")
-            if token:
-                self.session.headers["Authorization"] = f"Bearer {token}"
+            self.web_bearer_token = os.getenv("PLUTO_WEB_BEARER_TOKEN")
             return
 
         headers = {
@@ -181,10 +179,16 @@ class PLUTO(Service):
 
     def get_tracks(self, title: Title_T) -> Tracks:
         if self.web_mpd:
-            playout_response = self.session.get(self.web_playout, timeout=30)
+            web_headers = (
+                {"Authorization": f"Bearer {self.web_bearer_token}"}
+                if self.web_bearer_token else {}
+            )
+            playout_response = self.session.get(self.web_playout, headers=web_headers, timeout=30)
             playout_response.raise_for_status()
             playout = playout_response.json()
-            dash = DASH.from_url(self.web_mpd, self.session)
+            mpd_response = self.session.get(self.web_mpd, headers=web_headers, timeout=30)
+            mpd_response.raise_for_status()
+            dash = DASH.from_text(mpd_response.text, mpd_response.url)
             plan = plan_playout(dash.manifest, playout)
             tracks = dash.to_tracks(language=title.language, period_filter=plan.filter(dash.manifest))
             for track in (*tracks.videos, *tracks.audio):

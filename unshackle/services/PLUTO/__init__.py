@@ -16,12 +16,13 @@ from urllib.parse import urljoin
 import click
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
-from envied.core.credential import Credential
-from envied.core.manifests import DASH, HLS
-from envied.core.search_result import SearchResult
-from envied.core.service import Service
-from envied.core.titles import Episode, Movie, Movies, Series, Title_T, Titles_T
-from envied.core.tracks import Chapter, Chapters, Tracks
+from unshackle.core.credential import Credential
+from unshackle.core.manifests import DASH, HLS
+from unshackle.core.search_result import SearchResult
+from unshackle.core.service import Service
+from unshackle.core.titles import Episode, Movie, Movies, Series, Title_T, Titles_T
+from unshackle.core.tracks import Chapter, Chapters, Tracks
+from unshackle.services.PLUTO.playout import plan_playout
 
 
 class PLUTO(Service):
@@ -72,15 +73,23 @@ class PLUTO(Service):
     @staticmethod
     @click.command(name="PLUTO", short_help="https://pluto.tv/", help=__doc__)
     @click.option("--hls", is_flag=True, help="Request HLS instead of DASH")
+    @click.option("--web-mpd", type=str, help="MPD URL from the same Pluto session as --web-playout")
+    @click.option("--web-playout", type=str, help="Playout JSON URL from the same Pluto session")
     @click.argument("title", type=str)
     @click.pass_context
     def cli(ctx, **kwargs) -> PLUTO:
         return PLUTO(ctx, **kwargs)
 
-    def __init__(self, ctx, title: str, hls=False):
+    def __init__(self, ctx, title: str, hls=False, web_mpd=None, web_playout=None):
         super().__init__(ctx)
         self.title = title
         self.force_hls = hls
+        if bool(web_mpd) != bool(web_playout):
+            raise click.UsageError("--web-mpd and --web-playout must be supplied together")
+        if hls and web_mpd:
+            raise click.UsageError("--hls cannot be used with web DASH playback")
+        self.web_mpd = web_mpd
+        self.web_playout = web_playout
 
     def authenticate(
         self,
@@ -88,6 +97,11 @@ class PLUTO(Service):
         credential: Credential | None = None,
     ) -> None:
         super().authenticate(cookies, credential)
+        if self.web_mpd:
+            token = os.getenv("PLUTO_WEB_BEARER_TOKEN")
+            if token:
+                self.session.headers["Authorization"] = f"Bearer {token}"
+            return
 
         headers = {
             "cache-control": "no-cache",
@@ -166,6 +180,18 @@ class PLUTO(Service):
             return Movies(movie)
 
     def get_tracks(self, title: Title_T) -> Tracks:
+        if self.web_mpd:
+            playout_response = self.session.get(self.web_playout, timeout=30)
+            playout_response.raise_for_status()
+            playout = playout_response.json()
+            dash = DASH.from_url(self.web_mpd, self.session)
+            plan = plan_playout(dash.manifest, playout)
+            tracks = dash.to_tracks(language=title.language, period_filter=plan.filter(dash.manifest))
+            for track in (*tracks.videos, *tracks.audio):
+                track.data["dash"]["period_aware"] = True
+            self.log.info("Pluto playout validated: keeping %s of %s DASH periods", len(plan.kept), plan.count)
+            return tracks
+
         """
         The old endpoint for ad-free manifests still work, so we use that for now.
         The new format is included below for future reference.

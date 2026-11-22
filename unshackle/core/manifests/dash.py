@@ -32,6 +32,7 @@ from unshackle.core.drm import DRM_T, ClearKeyCENC, PlayReady, Widevine
 from unshackle.core.drm.segment_decrypt import SEGMENT_DRM_T, SegmentDecrypter, can_use
 from unshackle.core.drm.verify import decrypt_track
 from unshackle.core.events import events
+from unshackle.core.manifests.period_assembly import PeriodSpan, add_span
 from unshackle.core.session import RnetSession
 from unshackle.core.tracks import Audio, DownloadContext, Subtitle, Tracks, Video, resume
 from unshackle.core.tracks.track import (
@@ -446,6 +447,7 @@ class DASH:
         representation: Element = track.data["dash"]["representation"]
         rep_id: Optional[str] = track.data["dash"].get("representation_id") or representation.get("id")
         filtered_period_ids = set(track.data["dash"].get("filtered_period_ids", []))
+        period_aware = bool(track.data["dash"].get("period_aware", False))
 
         # Preserve existing DRM if it was set by the service, especially when service set Widevine
         # but manifest only contains PlayReady protection (common scenario for some services)
@@ -506,6 +508,7 @@ class DASH:
         all_periods = manifest.findall("Period")
         segments: list[tuple[str, Optional[str]]] = []
         seen_segments: set[tuple[str, Optional[str]]] = set()
+        period_spans: list[PeriodSpan] = []
         segment_durations: list[int] = []
         segment_timescale: float = 0
         init_data: Optional[bytes] = None
@@ -541,7 +544,7 @@ class DASH:
                 track=track,
                 track_url=track.url,
                 session=session,
-                probe_kid=period_idx == 0,
+                probe_kid=period_idx == 0 or period_aware,
                 window=config.sample,
             )
 
@@ -551,10 +554,13 @@ class DASH:
                 track_kid = p_kid
                 segment_timescale = p_timescale
 
+            before_period = len(segments)
             for seg in p_segments:
                 if seg not in seen_segments:
                     seen_segments.add(seg)
                     segments.append(seg)
+            if period_aware:
+                add_span(period_spans, period_idx, len(segments) - before_period, p_init)
             segment_durations.extend(p_durations)
             if config.sample and segments:
                 break
@@ -570,6 +576,8 @@ class DASH:
         # TODO: Should we floor/ceil/round, or is int() ok?
         track.data["dash"]["timescale"] = int(segment_timescale)
         track.data["dash"]["segment_durations"] = segment_durations
+        if period_aware:
+            track.data["dash"]["period_spans"] = tuple(period_spans)
 
         if not track.drm and init_data and isinstance(track, (Video, Audio)) and not binaries.FFProbe:
             log.warning("FFprobe was not found, so the init segment was not probed for a PSSH.")

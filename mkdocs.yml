@@ -136,6 +136,7 @@ nav:
   - Developer:
       - Creating a Service: dev/creating-a-service.md
       - Service Architecture: dev/service-architecture.md
+      - DASH Period Plans: dev/dash-period-plans.md
       - REST API:
           - Overview: dev/rest-api/index.md
           - Quick Start: dev/rest-api/quickstart.md

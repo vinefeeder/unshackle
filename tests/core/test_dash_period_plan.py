@@ -56,3 +56,31 @@ def test_reject_all_filtered():
             TimelineInterval(1000, 2000, False),
             TimelineInterval(3000, 3000, False),
         ])
+
+
+def test_plan_predicate_can_be_passed_to_dash_without_pluto_metadata():
+    """The generic plan has no dependence on service-specific JSON keys."""
+    mpd = manifest()
+    plan = PeriodPlan.build(mpd, [
+        TimelineInterval(0, 1000, True),
+        TimelineInterval(1000, 2000, False),
+        TimelineInterval(3000, 3000, True),
+    ])
+    assert [p.get("id") for p in mpd if not plan.filter(mpd)(p)] == [
+        "programme-a", "programme-b",
+    ]
+
+
+def test_period_plan_api_rejects_conflicting_selection():
+    """Explicit plans must not silently override legacy period predicates."""
+    from unshackle.core.manifests.dash import DASH
+
+    mpd = manifest()
+    plan = PeriodPlan.build(mpd, [
+        TimelineInterval(0, 1000, True),
+        TimelineInterval(1000, 2000, False),
+        TimelineInterval(3000, 3000, True),
+    ])
+    dash = DASH(mpd, "https://example.invalid/manifest.mpd")
+    with pytest.raises(ValueError, match="either period_filter or period_plan"):
+        dash.to_tracks(period_filter=lambda p: False, period_plan=plan)

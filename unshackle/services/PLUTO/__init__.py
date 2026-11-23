@@ -1,80 +1,54 @@
+"""Pluto TV web playback service.
+
+Playback is obtained from Pluto's web JWT and stitched DASH manifest. The
+playout-session JSON classifies ad periods; core DASH handles track selection.
+Title discovery follows the web APIs used by the earlier service, not Android.
+"""
+
 from __future__ import annotations
 
-import base64
-import concurrent
-import json
 import os
 import re
-import sys
 import time
-import uuid
 from collections.abc import Generator
 from http.cookiejar import CookieJar
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urlparse
 
 import click
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad
+
 from unshackle.core.credential import Credential
-from unshackle.core.manifests import DASH, HLS
+from unshackle.core.manifests import DASH
 from unshackle.core.search_result import SearchResult
 from unshackle.core.service import Service
 from unshackle.core.titles import Episode, Movie, Movies, Series, Title_T, Titles_T
-from unshackle.core.tracks import Chapter, Chapters, Tracks
-from unshackle.services.PLUTO.playout import plan_playout
+from unshackle.core.tracks import Chapters, Tracks
+from unshackle.services.PLUTO.playout import plan_playout, session_jwt_from_html
 
 
 class PLUTO(Service):
-    """
-    \b
-    Service code for Pluto TV on demand streaming service (https://pluto.tv/)
+    """Pluto TV on-demand playback through its current web endpoints.
 
-    \b
-    Version: 1.0.5
-    Author: stabbedbybrick
-    Authorization: None
-    Robustness:
-      Widevine:
-        L3: 1080p, AAC2.0
-
-    \b
-    Tips:
-        - Input examples:
-           SERIES: https://pluto.tv/us/shows/frasier-cbs-tv/
-           EPISODE: https://pluto.tv/us/shows/2180151/episode/6356cd01df7dfa0013468858/
-           MOVIE: https://pluto.tv/us/movies/69276e8c8e21e6575a019128/
-        - Use --lang LANG_RANGE option to request non-English tracks
-        - Use --hls to request HLS instead of DASH:
-           unshackle dl pluto URL --hls
-
-    \b
-    Notes:
-        - Both DASH(widevine) and HLS(AES) are looked for in the API.
-        - DASH is prioritized over HLS since the latter doesn't have 1080p. If DASH has audio/subtitle issues,
-          you can try using HLS with the --hls flag.
-        - Pluto use transport streams for HLS, meaning the video and audio are a part of the same stream
-          As a result, only videos are listed as tracks. But the audio will be included as well.
-
+    A playback test requires one fresh web JWT and a matching MPD / playout
+    response. The legacy advert-free clips API is intentionally not used.
     """
 
-    ALIASES = ("plutotv",)
+    ALIASES = ("plu", "plutotv")
     TITLE_RE = (
-        r"^"
-        r"(?:https?://)?(?:www\.)?pluto\.tv"
-        r"(?:/(?!(?:on-demand|movies|shows|series)\b)[a-z]{2,}(?:_[a-z]{2,})*)?"
+        r"^(?:https?://(?:www\.)?pluto\.tv)?"
+        r"(?:/[a-z]{2}(?:_[a-z]{2})?)?"
         r"(?:/on-demand)?"
-        r"/(?P<type>movies|shows|series)"
+        r"/(?P<type>movies|series|shows)"
         r"/(?P<id>[a-z0-9-]+)"
         r"(?:/(?:season/\d+/)?episode/(?P<episode>[a-z0-9-]+))?"
-        r"/?$"
+        r"(?:/details)?/?$"
     )
 
     @staticmethod
     @click.command(name="PLUTO", short_help="https://pluto.tv/", help=__doc__)
-    @click.option("--hls", is_flag=True, help="Request HLS instead of DASH")
-    @click.option("--web-mpd", type=str, help="MPD URL from the same Pluto session as --web-playout")
-    @click.option("--web-playout", type=str, help="Playout JSON URL from the same Pluto session")
+    @click.option("--web-mpd", type=str, help="Override stitched DASH MPD URL (diagnostic)")
+    @click.option("--web-playout", type=str, help="Override matching session JSON URL (diagnostic)")
+    @click.option("--hls", is_flag=True, help="Unsupported with this experimental DASH service")
     @click.argument("title", type=str)
     @click.pass_context
     def cli(ctx, **kwargs) -> PLUTO:
@@ -82,420 +56,190 @@ class PLUTO(Service):
 
     def __init__(self, ctx, title: str, hls=False, web_mpd=None, web_playout=None):
         super().__init__(ctx)
-        self.title = title
-        self.force_hls = hls
+        if hls:
+            raise click.UsageError("Pluto web mode currently supports DASH only")
         if bool(web_mpd) != bool(web_playout):
             raise click.UsageError("--web-mpd and --web-playout must be supplied together")
-        if hls and web_mpd:
-            raise click.UsageError("--hls cannot be used with web DASH playback")
+        self.title = title
         self.web_mpd = web_mpd
         self.web_playout = web_playout
+        self.web_jwt: str | None = None
+
+    def _web_headers(self) -> dict[str, str]:
+        if not self.web_jwt:
+            raise ValueError("Pluto web authentication has not completed")
+        return {
+            "Authorization": f"Bearer {self.web_jwt}",
+            "User-Agent": self.config["web_user_agent"],
+            "Referer": "https://pluto.tv/",
+            "Origin": "https://pluto.tv",
+            "Accept": "*/*",
+        }
 
     def authenticate(
-        self,
-        cookies: CookieJar | None = None,
-        credential: Credential | None = None,
+        self, cookies: CookieJar | None = None, credential: Credential | None = None
     ) -> None:
         super().authenticate(cookies, credential)
-        if self.web_mpd:
-            self.web_bearer_token = os.getenv("PLUTO_WEB_BEARER_TOKEN")
-            return
+        # Optional override is useful for comparing an existing browser session.
+        token = os.getenv("PLUTO_WEB_BEARER_TOKEN")
+        if not token:
+            response = self.session.get(
+                self.config["endpoints"]["web_bootstrap"],
+                headers={
+                    "User-Agent": self.config["web_user_agent"],
+                    "Accept": "text/html",
+                    "Referer": "https://pluto.tv/",
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+            token = session_jwt_from_html(response.text)
+        self.web_jwt = token
+        self.session_token = token  # Used by the existing licence-call convention.
 
-        headers = {
-            "cache-control": "no-cache",
-            "user-agent": "Pluto TV/17.2.0 okhttp/5.5.0",
-            "content-type": "application/json",
+    def _get_json(self, url: str, *, auth: bool = False, params: dict | None = None):
+        headers = self._web_headers() if auth else {
+            "User-Agent": self.config["web_user_agent"], "Referer": "https://pluto.tv/"
         }
-
-        payload = {
-            "deviceId": str(uuid.uuid4()),
-            "deviceMake": "Nvidia",
-            "deviceModel": "SHIELD Android TV",
-            "deviceVersion": "mdarcy",
-            "appVersion": "17.2.0",
-            "ptvAppName": "androidtv",
-            "drmCapabilities": "widevine:L1",
-            "isClientDNT": False,
-        }
-
-        start = self._request("POST", "/apps-api/v3.1/androidtv/platform/start.json", headers=headers, json=payload)
-
-        if not (token := start.get("session", {}).get("jwt")):
-            raise ValueError("Failed to get session token")
-        
-        self.session_token = token
-        self.region = start["session"].get("country", "")
+        response = self.session.get(url, headers=headers, params=params, timeout=30)
+        response.raise_for_status()
+        return response.json()
 
     def search(self) -> Generator[SearchResult, None, None]:
-        params = {
-            "term": self.title,
-            "showCanVids": "false",
-            "showBadges": "true",
-            "termCount": "10",
-        }
-        results = self._request("GET", "/apps-api/v3.2/androidtv/content/contentsearch/search.json", params=params)["terms"]
-
-        for result in results:
-            content_id = result.get("contentId")
-            kind = result.get("term_type")
-            show_path = result.get("path")
-
-            if kind == "show":
-                path = f"/{show_path}"
-            elif kind == "movie":
-                path = f"/movies/{content_id}"
-            else:
+        data = self._get_json(
+            self.config["endpoints"]["search"],
+            auth=True,
+            params={"q": self.title, "limit": "100"},
+        )
+        for entry in data.get("data", []):
+            if entry.get("type") not in ("movie", "series", "show"):
                 continue
-
+            kind = "movies" if entry["type"] == "movie" else "series"
+            item_id = entry.get("id")
+            if not item_id:
+                continue
             yield SearchResult(
-                id_=f"https://pluto.tv{path}",
-                title=result.get("title"),
-                description=result.get("about"),
-                label=kind,
-                url=f"https://pluto.tv{path}",
+                id_=f"https://pluto.tv/gb_ie/on-demand/{kind}/{item_id}/details",
+                title=entry.get("name"),
+                description=entry.get("synopsis"),
+                label=entry.get("type"),
+                url=f"https://pluto.tv/gb_ie/on-demand/{kind}/{item_id}/details",
             )
 
     def get_titles(self) -> Titles_T:
-        parsed = self.parse_title(self.title)
-        if not parsed:
-            self.log.error(f"Failed to parse title: {self.title}")
-            return
-        
-        kind = parsed.get("type")
-        slug = parsed.get("slug")
-        episode_id = parsed.get("episode")
-
-        if kind == "show" and episode_id:
-            episode = self._episode(episode_id)
-            return Series(episode)
-
-        elif kind == "show":
-            episodes = self._show(slug)
+        match = re.match(self.TITLE_RE, self.title, re.I)
+        if match is None:
+            raise ValueError(f"Unable to parse Pluto title URL: {self.title}")
+        kind, item_id, episode_id = (
+            match.group("type"), match.group("id"), match.group("episode")
+        )
+        if kind in ("series", "shows"):
+            # The web catalogue API is inherited from the original Envied
+            # service. For a direct episode, use a clearly-labelled fallback
+            # if catalogue lookup is unavailable in the current region.
+            url = self.config["endpoints"]["series"].format(season_id=item_id)
+            try:
+                data = self._get_json(url)
+                episodes = [
+                    Episode(
+                        id_=episode["_id"],
+                        service=self.__class__,
+                        title=data.get("name") or "Pluto TV",
+                        season=int(episode.get("season") or 0),
+                        number=int(episode.get("number") or 0),
+                        name=episode.get("name"),
+                        language="en",
+                        data=episode,
+                    )
+                    for season in data.get("seasons", [])
+                    for episode in season.get("episodes", [])
+                    if not episode_id or episode.get("_id") == episode_id
+                ]
+            except Exception:
+                if not episode_id:
+                    raise
+                self.log.warning("Web series catalogue unavailable; using direct episode ID")
+                episodes = []
+            if not episodes and episode_id:
+                episodes = [
+                    Episode(
+                        id_=episode_id, service=self.__class__,
+                        title="Pluto TV", season=0, number=0,
+                        name=episode_id, language="en",
+                    )
+                ]
+            if not episodes:
+                raise ValueError("No episodes returned for this Pluto series")
             return Series(episodes)
 
-        elif kind == "movies":
-            movie = self._movie(slug)
-            return Movies(movie)
+        url = self.config["endpoints"]["movie"].format(video_id=item_id)
+        movies = self._get_json(url, auth=True)
+        return Movies([
+            Movie(
+                id_=item["_id"], service=self.__class__,
+                name=item.get("name") or "Pluto TV",
+                language="en", year=self._year(item), data=item,
+            )
+            for item in movies
+        ])
 
     def get_tracks(self, title: Title_T) -> Tracks:
-        if self.web_mpd:
-            web_headers = (
-                {"Authorization": f"Bearer {self.web_bearer_token}"}
-                if self.web_bearer_token else {}
+        if not isinstance(title, Episode):
+            raise NotImplementedError(
+                "Web stitched DASH movie URL is not yet verified; testing episodes first"
             )
-            playout_response = self.session.get(self.web_playout, headers=web_headers, timeout=30)
-            playout_response.raise_for_status()
-            playout = playout_response.json()
-            mpd_response = self.session.get(self.web_mpd, headers=web_headers, timeout=30)
-            mpd_response.raise_for_status()
-            dash = DASH.from_text(mpd_response.text, mpd_response.url)
-            plan = plan_playout(dash.manifest, playout)
-            tracks = dash.to_tracks(language=title.language, period_filter=plan.filter(dash.manifest))
-            for track in (*tracks.videos, *tracks.audio):
-                track.data["dash"]["period_aware"] = True
-            self.log.info("Pluto playout validated: keeping %s of %s DASH periods", len(plan.kept), plan.count)
-            return tracks
+        episode_id = str(title.id)
+        manifest_url = self.web_mpd or self.config["endpoints"]["web_mpd"].format(
+            episode_id=episode_id
+        )
+        session_url = self.web_playout or self.config["endpoints"]["web_playout"]
+        # Avoid forwarding a bearer JWT to an arbitrary hostname from a CLI override.
+        allowed = {"ipv4.pluto.tv"}
+        if any(urlparse(url).hostname not in allowed for url in (manifest_url, session_url)):
+            raise ValueError("Web playback endpoints must use ipv4.pluto.tv")
 
-        """
-        The old endpoint for ad-free manifests still work, so we use that for now.
-        The new format is included below for future reference.
-        """
+        # Fetch the MPD first, establishing this episode's stitched playout,
+        # and only then retrieve the session's ad schedule.
+        response = self.session.get(manifest_url, headers=self._web_headers(), timeout=30)
+        response.raise_for_status()
+        dash = DASH.from_text(response.text, response.url)
+        session_params = None if self.web_playout else {"clientTime": int(time.time())}
+        playout = self._get_json(session_url, auth=True, params=session_params)
+        plan = plan_playout(dash.manifest, playout)
+        if playout["streamInfo"]["streamID"] != episode_id:
+            raise ValueError("Pluto session JSON belongs to a different episode")
 
-        # headers = {
-        #     "user-agent": "Pluto TV/17.2.0 okhttp/5.5.0",
-        # }
-
-        # params = {
-        #     "appName": "androidtv",
-        #     "appVersion": "17.2.0",
-        #     "contentId": title.id,
-        #     "contentType": "vod",
-        #     "drm": "widevine",
-        #     "drmLevel": "L1",
-        #     "streamType": "stitcher",
-        #     "locale": "en-us",
-        # }
-        # data = self._request("GET", "/apps-api/v4.0/androidtv/streaming-url.json", headers=headers, params=params)
-
-        # path = next((source for source in data["stitcherPaths"] if source.get("type") == "mpd"), None)
-        # source = path.get("path")
-        # manifest = f"https://ipv4.pluto.tv/apps-api/playout{source}"
-        # params = {
-        #     "includeExtendedEvents": "true",
-        # }
-        # headers = {
-        #     "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; SHIELD Android TV Build/RQ1A.210105.003)",
-        #     "Host": "ipv4.pluto.tv",
-        #     "Connection": "Keep-Alive",
-        #     "Authorization": f"Bearer {self.session_token}",
-        #     "X-Api-Access-Token": "ABDY8izoLeZAfB7dNR/hf0nHZSkLaiR4l7UnkVIA51creyHgeW63NMfl90VOLO0iFRU=",
-        # }
-        # r = self.session.get(manifest, headers=headers, params=params)
-        # r.raise_for_status()
-        # tracks = DASH.from_text(r.text, manifest).to_tracks(language=title.language)
-
-        response = self.session.get(self.config["endpoints"]["episodes"].format(episode_id=title.id))
-        if not response.ok:
-            raise ConnectionError(response.text)
-
-        episode = response.json()
-
-        sources = next((item.get("sources") for item in episode if not self.bumpers(item.get("name", ""))), None)
-
-        if not sources:
-            raise ValueError("Unable to find manifest for this title")
-
-        hls = next((x.get("file") for x in sources if x.get("type").lower() == "hls"), None)
-        dash = next((x.get("file") for x in sources if x.get("type").lower() == "dash"), None)
-
-        if dash and not self.force_hls:
-            manifest = dash.replace("https://siloh.pluto.tv", "http://silo-hybrik.pluto.tv.s3.amazonaws.com")
-            tracks = DASH.from_url(manifest, self.session).to_tracks(language=title.language)
-
-            for track in tracks.audio:
-                track.language = title.language
-                role = track.data["dash"]["adaptation_set"].find("Role")
-                if role is not None and role.get("value") in ["description", "alternative", "alternate"]:
-                    track.descriptive = True
-
-        else:
-            m3u8_url = hls.replace("https://siloh.pluto.tv", "http://silo-hybrik.pluto.tv.s3.amazonaws.com")
-            manifest = self.clean_manifest(self.session.get(m3u8_url).text)
-            tracks = HLS.from_text(manifest, m3u8_url).to_tracks(language=title.language)
-
-            # Remove separate AD audio tracks
-            for track in tracks.audio:
-                tracks.audio.remove(track)
-
+        tracks = dash.to_tracks(
+            language=title.language, period_filter=plan.filter(dash.manifest)
+        )
+        for track in (*tracks.videos, *tracks.audio):
+            track.data["dash"]["period_aware"] = True
+        self.log.info(
+            "Validated Pluto playout: retaining %d of %d periods",
+            len(plan.kept), plan.count,
+        )
         return tracks
 
     def get_chapters(self, title: Title_T) -> Chapters:
-        if not title.data.get("playbackEvents"):
-            return Chapters()
-        
-        events = {k: v for k, v in title.data.get("playbackEvents").items() if v is not None}
-        if not events:
-            return Chapters()
-        
-        chapters = []
-        for event in events:  # noqa: PLC0206
-            if event.lower() == "previewstarttimems":
-                chapters.append(Chapter(name="Preview", timestamp=events[event]))
-            elif event.lower() == "previewendtimems":
-                chapters.append(Chapter(timestamp=events[event]))
-            elif event.lower() == "opencreditstarttime":
-                chapters.append(Chapter(name="Opening Credits", timestamp=events[event]))
-            elif event.lower() == "opencreditendtimems":
-                chapters.append(Chapter(timestamp=events[event]))
-            elif event.lower() == "endcreditchaptertimems":
-                chapters.append(Chapter(name="End Credits", timestamp=events[event]))
-        
-        chapters = sorted(chapters, key=lambda x: x.timestamp)
-        return Chapters(chapters)
+        return Chapters()
 
-    def get_widevine_service_certificate(self, challenge: bytes, title: Title_T, **_: Any) -> bytes | str | None:
-        headers = {
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; SHIELD Android TV Build/RQ1A.210105.003)",
-            "Authorization": f"Bearer {self.session_token}",
-            "X-Api-Access-Token": "ABDY8izoLeZAfB7dNR/hf0nHZSkLaiR4l7UnkVIA51creyHgeW63NMfl90VOLO0iFRU=",
-        }
+    def get_widevine_service_certificate(self, **_: Any) -> None:
+        return None
 
-        r = self.session.post(url=self.config["endpoints"]["wv"], headers=headers, data=challenge)
-        if r.status_code != 200:
-            raise ConnectionError(r.text)
-
-        return r.content
-
-    def get_widevine_license(self, challenge: bytes, **_: Any) -> bytes | str | None:
-        headers = {
-            "Content-Type": "application/octet-stream",
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; SHIELD Android TV Build/RQ1A.210105.003)",
-            "Authorization": f"Bearer {self.session_token}",
-            "X-Api-Access-Token": "ABDY8izoLeZAfB7dNR/hf0nHZSkLaiR4l7UnkVIA51creyHgeW63NMfl90VOLO0iFRU=",
-        }
-
-        r = self.session.post(url=self.config["endpoints"]["wv"], headers=headers, data=challenge)
-        if r.status_code != 200:
-            raise ConnectionError(r.text)
-
-        return r.content
-
-    def get_playready_license(self, *, challenge: str, **_: Any) -> bytes | str | None:
-        headers = {
-            "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": "http://schemas.microsoft.com/DRM/2007/03/protocols/AcquireLicense",
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; SHIELD Android TV Build/RQ1A.210105.003)",
-            "Authorization": f"Bearer {self.session_token}",
-            "X-Api-Access-Token": "ABDY8izoLeZAfB7dNR/hf0nHZSkLaiR4l7UnkVIA51creyHgeW63NMfl90VOLO0iFRU=",
-        }
-
-        r = self.session.post(url=self.config["endpoints"]["pr"], headers=headers, data=challenge)
-        if r.status_code != 200:
-            raise ConnectionError(r.status_code, r.text)
-
-        return r.content
-
-    # service-specific functions
-
-    def get_season_episodes(self, season: int, section: str) -> list:
-        try:
-            res = self._request(
-                "GET",
-                f"/apps-api/v2.0/androidtv/videos/section/{section}.json",
-                params={"begin": "0", "rows": "999", "params": f"seasonNum={season}", "seasonNum": season},
-            )
-            return res.get("sectionItems", {}).get("itemList", [])
-        except Exception as e:
-            self.log.error(f"Error fetching data for season {season}: {e}")
-            return []
-
-    def _show(self, title: str) -> Episode:
-        data = self._request("GET", f"/apps-api/v3.0/androidtv/shows/slug/{title}.json")
-
-        links = next((x.get("links") for x in data["showMenu"] if x.get("device_app_id") == "all_platforms"), None)
-        config = next((x.get("videoConfigUniqueName") for x in links if "Episodes" in x.get("title", "")), "SHOW_LANDING_EPISODES")
-        show = next((x for x in data["show"]["results"] if x.get("type") == "show"), None)
-        seasons = [x["seasonNum"] for x in data["available_video_seasons"]["itemList"] if x.get("seasonNum")]
-        language = show.get("audienceLanguage", "en-US")
-
-        show_data = self._request(
-            "GET",
-            "/apps-api/v2.0/androidtv/shows/{}/videos/config/{}.json".format(show.get("show_id"), config),
-            params={"platformType": "apps", "rows": "1", "begin": "0"},
+    def get_widevine_license(self, challenge: bytes, **_: Any) -> bytes:
+        headers = self._web_headers()
+        headers["Content-Type"] = "application/octet-stream"
+        response = self.session.post(
+            self.config["endpoints"]["wv"], headers=headers,
+            data=challenge, timeout=30,
         )
-
-        section = next(
-            (x["sectionId"] for x in show_data["videoSectionMetadata"] if x["title"] == "Full Episodes"), None
-        )
-
-        episodes = []
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future_to_season = {executor.submit(self.get_season_episodes, season, section): season for season in seasons}
-            for future in concurrent.futures.as_completed(future_to_season):
-                episodes.extend(future.result())
-
-        return [
-            Episode(
-                id_=episode.get("contentId"),
-                title=episode.get("seriesTitle"),
-                season=episode.get("seasonNum", 0),
-                number=episode.get("episodeNum") or episode.get("positionNum"),
-                name=episode["label"],
-                language=language,
-                service=self.__class__,
-                # year=episode.get("originalReleaseYear"),
-                data=episode,
-            )
-            for episode in episodes
-            if episode["fullEpisode"]
-        ]
-
-    def _episode(self, title: str) -> Episode:
-        data = self._request("GET", f"/apps-api/v2.0/androidtv/video/cid/{title}.json")
-
-        return [
-            Episode(
-                id_=episode.get("contentId"),
-                title=episode.get("seriesTitle"),
-                season=episode.get("seasonNum", 0),
-                number=episode.get("episodeNum") or episode.get("positionNum"),
-                name=episode.get("label"),
-                language=episode.get("audienceLanguage", "en-US"),
-                service=self.__class__,
-                data=episode,
-            )
-            for episode in data["itemList"]
-            if episode["fullEpisode"]
-        ]
-
-    def _movie(self, title: str) -> Movie:
-        res = self._request(
-            "GET", f"/apps-api/v3.0/androidtv/movies/{title}.json", params={"includeContentInfo": "true"}
-        )
-        title = res["movie"]["movieContent"]
-        return [
-            Movie(
-                id_=title.get("contentId"),
-                name=title.get("title"),
-                year=title.get("originalReleaseYear"),
-                language=res["movie"].get("audienceLanguage", "en-US"),
-                service=self.__class__,
-                data=title,
-            )
-        ]
-
-    def _request(self, method: str, endpoint: str, **kwargs) -> Any[dict | str]:
-        url = urljoin(self.config["endpoints"]["base_url"], endpoint)
-
-        if not kwargs.get("params"):
-            kwargs["params"] = {}
-        kwargs.get("params").update({"at": self._auth_token()})
-
-        response = self.session.request(method, url, **kwargs)
-
-        if response.status_code != 200:
-            raise ConnectionError(f"{response.status_code}: {response.text}")
-
-        try:
-            data = json.loads(response.content)
-            if (success := data.get("success")) is not None and not success:
-                self.log.error(data.get("message"))
-                sys.exit(1)
-            
-            return data
-
-        except json.JSONDecodeError:
-            return response.text
-
-    def _auth_token(self) -> str:
-        key = bytes.fromhex(self.config["key_spec"])
-        app_secret = self.config["app_secret"]
-
-        timestamp_ms = int(time.time() * 1000)
-        payload = f"{timestamp_ms}|{app_secret}"
-        plaintext_bytes = payload.encode("utf-8")
-
-        iv = os.urandom(16)
-        cipher = AES.new(key, AES.MODE_CBC, iv=iv)
-        padded_data = pad(plaintext_bytes, AES.block_size, style="pkcs7")
-        encrypted_payload = cipher.encrypt(padded_data)
-
-        token_data = b"\x00\x10" + iv + encrypted_payload
-        return base64.b64encode(token_data).decode("utf-8")
-
-    def parse_title(self, url: str) -> dict | None:
-        m = re.match(self.TITLE_RE, url)
-        if not m:
-            return None
-        t = m.group("type")
-        return {
-            "type": "show" if t in ("shows", "series") else t,
-            "slug": m.group("id"),
-            "episode": m.group("episode"),
-        }
+        response.raise_for_status()
+        return response.content
 
     @staticmethod
-    def clean_manifest(text: str) -> str:
-        # Remove fairplay entries
-        index = text.find('#PLUTO-DRM:ID="fairplay')
-        if index == -1:
-            return text
-        else:
-            end_of_previous_line = text.rfind("\n", 0, index)
-            if end_of_previous_line == -1:
-                return ""
-            else:
-                return text[:end_of_previous_line]
-
-    @staticmethod
-    def bumpers(text: str) -> bool:
-        ads = (
-            "Pluto_TV_OandO",
-            "_ad",
-            "creative",
-            "Bumper",
-            "Promo",
-            "WarningCard",
-        )
-
-        return any(ad in text for ad in ads)
+    def _year(item: dict) -> int | None:
+        for value in (item.get("name", ""), item.get("slug", "")):
+            match = re.search(r"\b(19\d{2}|20\d{2})\b", value or "")
+            if match:
+                return int(match.group(1))
+        return None

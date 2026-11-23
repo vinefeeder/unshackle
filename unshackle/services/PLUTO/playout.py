@@ -28,7 +28,7 @@ def plan_playout(manifest: Element, playout: dict[str, Any], *, tolerance_ms: in
     """Select Pluto programme periods, rejecting unrelated or incomplete playouts.
 
     Use data from one playback session for both inputs. Server times describe the
-    advertising-inclusive timeline; clipStartInEpisodeMs describes content time.
+    advertising-inclusive timeline; clipStartInEpisodeMs describes source content time, which may start nonzero.
     """
     clips = playout.get("clips")
     stream = playout.get("streamInfo")
@@ -40,6 +40,7 @@ def plan_playout(manifest: Element, playout: dict[str, Any], *, tolerance_ms: in
     first_start = _timestamp_ms(clips[0]["startTime"])
     next_start = first_start
     programme_ms = 0
+    first_programme_offset_ms: int | None = None
     intervals: list[TimelineInterval] = []
 
     for index, item in enumerate(clips):
@@ -55,8 +56,19 @@ def plan_playout(manifest: Element, playout: dict[str, Any], *, tolerance_ms: in
             raise ValueError(f"Unrecognised Pluto playout type {kind!r} at entry {index}")
         if keep:
             episode_offset = item.get("clipStartInEpisodeMs")
-            if not isinstance(episode_offset, int) or abs(episode_offset - programme_ms) > tolerance_ms:
-                raise ValueError(f"Programme offset mismatch at entry {index}")
+            if type(episode_offset) is not int or episode_offset < 0:
+                raise ValueError(f"Invalid programme offset at entry {index}")
+            # Some VOD sessions begin at a nonzero offset in the underlying
+            # source asset. Check continuity relative to the first programme
+            # clip rather than incorrectly requiring an absolute zero.
+            if first_programme_offset_ms is None:
+                first_programme_offset_ms = episode_offset
+            expected_offset = first_programme_offset_ms + programme_ms
+            if abs(episode_offset - expected_offset) > tolerance_ms:
+                raise ValueError(
+                    f"Programme offset mismatch at entry {index}: "
+                    f"expected {expected_offset} ms, got {episode_offset} ms"
+                )
             programme_ms += end - start
             if item.get("episodeID") != stream["streamID"]:
                 raise ValueError(f"Pluto episode ID mismatch at entry {index}")

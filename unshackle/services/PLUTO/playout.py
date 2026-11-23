@@ -6,6 +6,8 @@ receives a generic PeriodPlan, validated against the matching MPD.
 
 from __future__ import annotations
 
+import json
+from html.parser import HTMLParser
 from datetime import datetime, timezone
 from typing import Any
 from xml.etree.ElementTree import Element
@@ -62,3 +64,37 @@ def plan_playout(manifest: Element, playout: dict[str, Any], *, tolerance_ms: in
         next_start = end
 
     return PeriodPlan.build(manifest, intervals, tolerance_ms=tolerance_ms)
+
+
+class _NextDataScript(HTMLParser):
+    """Read only the JSON script tagged __NEXT_DATA__, without executing JS."""
+
+    def __init__(self):
+        super().__init__()
+        self.active = False
+        self.chunks: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() == "script" and dict(attrs).get("id") == "__NEXT_DATA__":
+            self.active = True
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "script":
+            self.active = False
+
+    def handle_data(self, data):
+        if self.active:
+            self.chunks.append(data)
+
+
+def session_jwt_from_html(html: str) -> str:
+    """Extract props.sessionJwt from the Pluto web bootstrap page."""
+    parser = _NextDataScript()
+    parser.feed(html)
+    if not parser.chunks:
+        raise ValueError("Pluto web page has no __NEXT_DATA__ script")
+    data = json.loads("".join(parser.chunks))
+    token = data.get("props", {}).get("sessionJwt")
+    if not isinstance(token, str) or token.count(".") != 2:
+        raise ValueError("Pluto bootstrap page has no usable props.sessionJwt")
+    return token

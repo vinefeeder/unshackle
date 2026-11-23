@@ -14,8 +14,7 @@ As early as 2022 boltdns.net experimented with SSAI (Server Side Advert
 Inclusion). The weakness of all SSAI systems is they have to pass a timing
 or playout-plan to the browser. Boltdns.net used an xml file - a VMAP - long
 since defunct. 
-In PLUTO the playout-plan is returned from https://ipv4.pluto.tv/api/tn/
-video/playout//v3/session.json.
+In PLUTO the playout-plan is returned from https://ipv4.pluto.tv/api/tn/video/playout//v3/session.json.
 
 For example. 
 ```text

@@ -470,6 +470,14 @@ Each exposes `from_url(url, session=...)` (or `from_text(text, url)`) and then
                   .to_tracks(language=title.language)
     ```
 
+!!! tip "Multi-period DASH and validated period plans"
+    If a service provides its own playout or SSAI timing metadata, it can
+    build a generic `PeriodPlan` and pass it as
+    `DASH.to_tracks(language=..., period_plan=plan)`. This selects complete
+    DASH periods **and** enables independent assembly at their boundaries.
+    See [Selecting and Assembling MPEG-DASH Periods](dash-period-plans.md)
+    for the model, validation rules, example and limitations.
+
 !!! warning "Always pass `language=`"
     Pass the title's original language to `to_tracks(language=...)`. For DASH and
     HLS this is **required as a fallback**. If `to_tracks` cannot derive a track's

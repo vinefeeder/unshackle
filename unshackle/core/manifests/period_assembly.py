@@ -11,6 +11,7 @@ Do NOT concatenate encrypted periods before checking their per-period DRM state.
 from __future__ import annotations
 
 import subprocess
+import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -88,10 +89,40 @@ def assemble_parts(
             output.write(span.init_data)
             for fragment in segments[span.first_segment:span.last_segment]:
                 with fragment.open("rb") as source:
-                    import shutil
                     shutil.copyfileobj(source, output, 1024 * 1024)
         results.append(transform(path, span) if transform else path)
     return results
+
+
+def remux_parts(
+    parts: Sequence[Path],
+    directory: Path,
+    *,
+    ffmpeg: str = "ffmpeg",
+) -> list[Path]:
+    """Copy-remux each *clear* period independently before concatenating.
+
+    Standalone MP4 muxing rebuilds timing/index metadata and gives the concat
+    demuxer independent files to rebase. It never re-encodes video or audio.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    remuxed = []
+    for index, part in enumerate(parts):
+        target = directory / f"normalized_{index:04d}.mp4"
+        subprocess.run(
+            [
+                ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
+                "-fflags", "+genpts", "-i", str(part),
+                "-map", "0", "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart", str(target),
+            ],
+            check=True,
+        )
+        if not target.is_file() or target.stat().st_size == 0:
+            raise ValueError(f"FFmpeg produced no data for period {index}")
+        remuxed.append(target)
+    return remuxed
 
 
 def concatenate_parts(parts: Sequence[Path], destination: Path, *, ffmpeg: str = "ffmpeg") -> None:
@@ -106,7 +137,7 @@ def concatenate_parts(parts: Sequence[Path], destination: Path, *, ffmpeg: str =
         if not path.is_file():
             raise FileNotFoundError(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    # Emit to a pipe rather than a list file: avoid quoting and transient path bugs.
+    # Emit a concat demuxer script; paths are escaped for its single-quote grammar.
     concat_script = "".join(
         f"file '{str(path.resolve()).replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'\n"
         for path in parts

@@ -10,6 +10,34 @@ This guide is for **service authors** who need to keep selected periods from
 a multi-period DASH manifest, and for core contributors working on the
 period-aware downloader.
 
+As early as 2022 boltdns.net experimented with SSAI (Server Side Advert
+Inclusion). The weakness of all SSAI systems is they have to pass a timing
+or playout-plan to the browser. Boltdns.net used an xml file - a VMAP - long
+since defunct. 
+In PLUTO the playout-plan is returned from https://ipv4.pluto.tv/api/tn/
+video/playout//v3/session.json.
+
+For example. 
+           SERVICE-SPECIFIC CODE
+        ┌──────────────────────────┐
+        │ PLUTO                    │
+        │ Fetch playout JSON       │
+        │ Identify content clips   │
+        │ Match clips to periods   │
+        └─────────────┬────────────┘
+                      │
+             Period selection
+                      │
+                      ▼
+           GENERIC UNSHACKLE CORE
+        ┌──────────────────────────┐
+        │ Validate period selection│
+        │ Download each period     │
+        │ Handle DRM               │
+        │ Normalize timestamps     │
+        │ Concatenate periods      │
+        └──────────────────────────┘
+
 !!! note "Division of responsibility"
     **The service determines which periods belong in the output.** It can use
     an API response, a playout schedule, VMAP, SSAI metadata, or other reliable

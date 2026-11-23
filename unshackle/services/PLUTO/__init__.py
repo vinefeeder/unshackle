@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import uuid
 from collections.abc import Generator
 from http.cookiejar import CookieJar
 from typing import Any
@@ -64,6 +65,22 @@ class PLUTO(Service):
         self.web_mpd = web_mpd
         self.web_playout = web_playout
         self.web_jwt: str | None = None
+        # Retained from the earlier web service for catalogue/search requests.
+        # Do not attach these query parameters to the stitched MPD URL.
+        self.catalogue_params = {
+            "appName": "web",
+            "appVersion": "na",
+            "clientID": str(uuid.uuid4()),
+            "deviceDNT": 0,
+            "deviceId": "unknown",
+            "clientModelNumber": "na",
+            "serverSideAds": "false",
+            "deviceMake": "unknown",
+            "deviceModel": "web",
+            "deviceType": "web",
+            "deviceVersion": "unknown",
+            "drmCapabilities": "widevine:L3",
+        }
 
     def _web_headers(self) -> dict[str, str]:
         if not self.web_jwt:
@@ -101,6 +118,8 @@ class PLUTO(Service):
         headers = self._web_headers() if auth else {
             "User-Agent": self.config["web_user_agent"], "Referer": "https://pluto.tv/"
         }
+        if url.startswith(("https://service-vod.", "https://service-media-search.")):
+            params = {**self.catalogue_params, **(params or {})}
         response = self.session.get(url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
         return response.json()

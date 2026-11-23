@@ -32,7 +32,9 @@ from unshackle.core.drm import DRM_T, ClearKeyCENC, PlayReady, Widevine
 from unshackle.core.drm.segment_decrypt import SEGMENT_DRM_T, SegmentDecrypter, can_use
 from unshackle.core.drm.verify import decrypt_track
 from unshackle.core.events import events
-from unshackle.core.manifests.period_assembly import PeriodSpan, add_span
+from unshackle.core.manifests.period_assembly import (
+    PeriodSpan, add_span, assemble_parts, concatenate_parts, remux_parts, validate_spans,
+)
 from unshackle.core.session import RnetSession
 from unshackle.core.tracks import Audio, DownloadContext, Subtitle, Tracks, Video, resume
 from unshackle.core.tracks.track import (
@@ -509,6 +511,7 @@ class DASH:
         segments: list[tuple[str, Optional[str]]] = []
         seen_segments: set[tuple[str, Optional[str]]] = set()
         period_spans: list[PeriodSpan] = []
+        period_kids: list[Optional[UUID]] = []
         segment_durations: list[int] = []
         segment_timescale: float = 0
         init_data: Optional[bytes] = None
@@ -561,6 +564,8 @@ class DASH:
                     segments.append(seg)
             if period_aware:
                 add_span(period_spans, period_idx, len(segments) - before_period, p_init)
+                if len(segments) > before_period:
+                    period_kids.append(p_kid)
             segment_durations.extend(p_durations)
             if config.sample and segments:
                 break
@@ -577,6 +582,7 @@ class DASH:
         track.data["dash"]["timescale"] = int(segment_timescale)
         track.data["dash"]["segment_durations"] = segment_durations
         if period_aware:
+            validate_spans(period_spans, len(segments))
             track.data["dash"]["period_spans"] = tuple(period_spans)
 
         if not track.drm and init_data and isinstance(track, (Video, Audio)) and not binaries.FFProbe:
@@ -620,6 +626,13 @@ class DASH:
         else:
             drm = None
 
+        if period_aware and drm:
+            known_kids = {kid for kid in period_kids if kid is not None}
+            if len(known_kids) > 1:
+                raise click.ClickException(
+                    "DASH periods use different content KIDs; per-period licensing is not implemented yet"
+                )
+
         if DOWNLOAD_LICENCE_ONLY.is_set():
             progress(downloaded="[yellow]SKIPPED")
             return
@@ -632,7 +645,7 @@ class DASH:
         # replacing the per-segment files, init write and merge pass.
         collapse_span = (
             DASH.collapsible_single_url(isinstance(track, Subtitle), segments, len(init_data))
-            if init_data is not None and not config.sample
+            if init_data is not None and not config.sample and not period_aware
             else None
         )
         if collapse_span and init_data:
@@ -640,9 +653,9 @@ class DASH:
                 collapse_span = None
         collapse_single_url = collapse_span is not None
 
-        use_segment_decrypt = not collapse_single_url and bool(init_data) and can_use(drm, config.decryption, init_data)
+        use_segment_decrypt = not period_aware and not collapse_single_url and bool(init_data) and can_use(drm, config.decryption, init_data)
         # subtitle segments are tiny, the post-download merge costs nothing there
-        use_rolling_merge = not collapse_single_url and config.merge_segments and not isinstance(track, Subtitle)
+        use_rolling_merge = not period_aware and not collapse_single_url and config.merge_segments and not isinstance(track, Subtitle)
 
         if not collapse_single_url:
             # per-segment decryption rewrites each segment in place, so a segment kept from an
@@ -748,7 +761,34 @@ class DASH:
                 save_path.unlink(missing_ok=True)
             raise
 
-        if collapse_span:
+        if period_aware:
+            # Retain segment files until the six programme periods have been
+            # independently assembled. The ordinary rolling merge discards
+            # their boundaries and leads to non-monotonic DTS at the joins.
+            for control_file in save_dir.glob("*.!dev"):
+                control_file.unlink(missing_ok=True)
+            files_by_index = [
+                save_dir / ("{i:0%d}.mp4" % (len(str(len(segments))))).format(i=i)
+                for i in range(len(segments))
+            ]
+            missing = [path for path in files_by_index if not path.is_file()]
+            if missing:
+                raise FileNotFoundError(f"Missing {len(missing)} DASH fragments, first: {missing[0]}")
+            if not binaries.FFMPEG:
+                raise click.ClickException("Multi-period DASH assembly requires FFmpeg")
+            parts_dir = save_dir / "period_parts"
+            parts = assemble_parts(files_by_index, period_spans, parts_dir)
+            if drm:
+                progress(downloaded="Decrypting periods", completed=0, total=len(parts))
+                for part in parts:
+                    decrypt_track(drm, part, license_widevine)
+                    assert_fragments_decrypted(part)
+                    progress(advance=1)
+            normalized = remux_parts(parts, save_dir / "period_normalized", ffmpeg=str(binaries.FFMPEG))
+            concatenate_parts(normalized, save_path, ffmpeg=str(binaries.FFMPEG))
+            if not save_path.is_file() or not save_path.stat().st_size:
+                raise click.ClickException("Period-aware FFmpeg concatenation produced no output")
+        elif collapse_span:
             with open(save_path, "r+b") as collapsed:
                 collapsed.truncate(collapse_span[1] + 1)
         elif merger:
@@ -837,13 +877,17 @@ class DASH:
         track.path = save_path
         events.emit(events.Types.TRACK_DOWNLOADED, track=track)
 
-        if drm:
+        if drm and not period_aware:
             progress(downloaded="Decrypting", completed=0, total=None)
             decrypt_track(drm, save_path, license_widevine, decrypt=not decrypter)
             assert_fragments_decrypted(save_path)
             track.drm = None
             events.emit(events.Types.TRACK_DECRYPTED, track=track, drm=drm, segment=None)
             progress(downloaded="Decrypted", completed=100, total=100)
+
+        if period_aware and drm:
+            track.drm = None
+            events.emit(events.Types.TRACK_DECRYPTED, track=track, drm=drm, segment=None)
 
         if save_dir.exists() and save_dir.name.endswith("_segments"):
             try:

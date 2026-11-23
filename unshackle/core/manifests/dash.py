@@ -35,6 +35,7 @@ from unshackle.core.events import events
 from unshackle.core.manifests.period_assembly import (
     PeriodSpan, add_span, assemble_parts, concatenate_parts, remux_parts, validate_spans,
 )
+from unshackle.core.manifests.period_plan import PeriodPlan
 from unshackle.core.session import RnetSession
 from unshackle.core.tracks import Audio, DownloadContext, Subtitle, Tracks, Video, resume
 from unshackle.core.tracks.track import (
@@ -234,7 +235,11 @@ class DASH:
         return cls(manifest, url)
 
     def to_tracks(
-        self, language: Optional[Union[str, Language]] = None, period_filter: Optional[Callable] = None
+        self,
+        language: Optional[Union[str, Language]] = None,
+        period_filter: Optional[Callable] = None,
+        *,
+        period_plan: Optional[PeriodPlan] = None,
     ) -> Tracks:
         """
         Convert an MPEG-DASH document to Video, Audio and Subtitle Track objects.
@@ -242,9 +247,11 @@ class DASH:
         Parameters:
             language: The Title's Original Recorded Language. unshackle also uses it as a
                 fallback track language value when the manifest gives no language information.
-            period_filter: Filter out period's within the manifest. A filtered period without an
-                id, or with the id of a kept period, gets its own, so filtered_period_ids names
-                every filtered period and no kept one.
+            period_filter: Legacy predicate returning True for excluded MPD periods.
+            period_plan: Validated, service-supplied period selection. It identifies
+                excluded periods and enables independent per-period assembly for
+                returned video/audio tracks. Mutually exclusive with period_filter.
+                The DASH core never interprets service-specific ad metadata.
 
         Only the first main-content period becomes tracks. Later periods do not add tracks of their
         own, but download_track stitches the segments of every content period into each returned
@@ -252,6 +259,11 @@ class DASH:
 
         All Track URLs will be a list of segment URLs.
         """
+        if period_plan is not None:
+            if period_filter is not None:
+                raise ValueError("Supply either period_filter or period_plan, not both")
+            period_filter = period_plan.filter(self.manifest)
+
         tracks = Tracks()
 
         filtered_period_ids: list[str] = []
@@ -405,6 +417,10 @@ class DASH:
                     )
 
             break
+
+        if period_plan is not None:
+            for track in (*tracks.videos, *tracks.audio):
+                track.data["dash"]["period_aware"] = True
 
         tracks.manifest_url = self.url
 

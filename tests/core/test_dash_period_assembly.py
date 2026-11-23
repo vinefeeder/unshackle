@@ -58,13 +58,23 @@ def test_concat_calls_stream_copy(tmp_path: Path):
     first.touch()
     second.touch()
     destination = tmp_path / "output.mp4"
-    with patch("unshackle.core.manifests.period_assembly.subprocess.run") as run:
+    def verify(command, **kwargs):
+        assert command[command.index("-c") + 1] == "copy"
+        assert command[command.index("-f") + 1] == "concat"
+        assert command[command.index("-i") + 1] != "pipe:0"
+        script_path = Path(command[command.index("-i") + 1])
+        script_data = script_path.read_text(encoding="utf-8")
+        assert str(first.resolve()) in script_data
+        assert str(second.resolve()) in script_data
+        assert script_data.startswith("ffconcat version 1.0\\n".replace("\\n", "\n"))
+        assert kwargs["check"] is True
+
+    with patch(
+        "unshackle.core.manifests.period_assembly.subprocess.run", side_effect=verify
+    ) as run:
         concatenate_parts([first, second], destination)
-    command = run.call_args.args[0]
-    assert command[command.index("-c") + 1] == "copy"
-    assert run.call_args.kwargs["check"] is True
-    assert str(first.resolve()) in run.call_args.kwargs["input"]
-    assert str(second.resolve()) in run.call_args.kwargs["input"]
+    assert run.call_count == 1
+    assert not list(tmp_path.glob("dash_parts_*.ffconcat"))
 
 
 def test_remux_uses_copy_without_reencoding(tmp_path: Path):

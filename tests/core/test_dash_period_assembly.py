@@ -10,6 +10,7 @@ from unshackle.core.manifests.period_assembly import (
     add_span,
     assemble_parts,
     concatenate_parts,
+    remux_parts,
     split_segment_list,
     validate_spans,
 )
@@ -64,3 +65,28 @@ def test_concat_calls_stream_copy(tmp_path: Path):
     assert run.call_args.kwargs["check"] is True
     assert str(first.resolve()) in run.call_args.kwargs["input"]
     assert str(second.resolve()) in run.call_args.kwargs["input"]
+
+
+def test_remux_uses_copy_without_reencoding(tmp_path: Path):
+    part = tmp_path / "part.mp4"
+    part.write_bytes(b"fake content")
+    normalized = tmp_path / "normalized"
+
+    def fake_run(command, **kwargs):
+        assert command[command.index("-c") + 1] == "copy"
+        assert "-avoid_negative_ts" in command
+        Path(command[-1]).write_bytes(b"normalized")
+
+    with patch("unshackle.core.manifests.period_assembly.subprocess.run", side_effect=fake_run) as run:
+        result = remux_parts([part], normalized)
+    assert result[0].read_bytes() == b"normalized"
+    assert run.call_count == 1
+
+
+def test_remux_rejects_empty_output(tmp_path: Path):
+    part = tmp_path / "part.mp4"
+    part.touch()
+
+    with patch("unshackle.core.manifests.period_assembly.subprocess.run"):
+        with pytest.raises(ValueError, match="no data"):
+            remux_parts([part], tmp_path / "normalized")

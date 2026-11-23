@@ -54,6 +54,37 @@ def test_rejects_discontinuous_offset_after_nonzero_first_content_offset():
         plan_playout(manifest(), altered)
 
 
+def test_missing_source_offsets_still_selects_programme_periods():
+    altered = deepcopy(playout())
+    for entry in altered["clips"]:
+        if entry["type"] == "clip":
+            entry.pop("clipStartInEpisodeMs", None)
+    plan = plan_playout(manifest(), altered)
+    assert [period.index for period in plan.kept] == [0, 2]
+
+
+def test_missing_first_source_offset_does_not_break_later_anchor():
+    altered = deepcopy(playout())
+    altered["clips"][0].pop("clipStartInEpisodeMs")
+    altered["clips"][2]["clipStartInEpisodeMs"] = 100_000
+    plan = plan_playout(manifest(), altered)
+    assert [period.index for period in plan.kept] == [0, 2]
+
+
+def test_missing_later_source_offset_does_not_break_first_anchor():
+    altered = deepcopy(playout())
+    altered["clips"][2].pop("clipStartInEpisodeMs")
+    plan = plan_playout(manifest(), altered)
+    assert [period.index for period in plan.kept] == [0, 2]
+
+
+def test_invalid_present_source_offset_is_rejected():
+    altered = deepcopy(playout())
+    altered["clips"][0]["clipStartInEpisodeMs"] = "not-a-number"
+    with pytest.raises(ValueError, match="Invalid programme offset"):
+        plan_playout(manifest(), altered)
+
+
 def test_rejects_stale_ad_schedule():
     altered = deepcopy(playout())
     altered["clips"][1]["endTime"] = "2026-11-21T10:00:04.000Z"

@@ -363,7 +363,12 @@ A typical `get_tracks` therefore looks like fetching the manifest text with
   and its `EXT-X-DISCONTINUITY`, so a clear ad break inside an encrypted track does
   not disturb decryption.
 - **DASH**: pass a `period_filter` callable to `to_tracks` to drop whole periods.
-  unshackle automatically drops the caching-breadth periods that some services send, and the non-`content` segment types.
+  For discontinuous multi-period streams, use a validated `PeriodPlan` via
+  `to_tracks(period_plan=plan)` instead; it enables independent per-period
+  assembly as well as selection. See
+  [Selecting and Assembling MPEG-DASH Periods](dash-period-plans.md).
+  unshackle automatically drops caching-breadth periods and non-`content`
+  segment types.
 
 ### Format gotchas worth knowing
 

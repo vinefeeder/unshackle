@@ -228,11 +228,9 @@ class PLUTO(Service):
         if playout["streamInfo"]["streamID"] != episode_id:
             raise ValueError("Pluto session JSON belongs to a different episode")
 
-        tracks = dash.to_tracks(
-            language=title.language, period_filter=plan.filter(dash.manifest)
-        )
-        for track in (*tracks.videos, *tracks.audio):
-            track.data["dash"]["period_aware"] = True
+        # Pluto interprets its own clips JSON; DASH receives only the
+        # service-independent selection plan, not Pluto's advertising schema.
+        tracks = dash.to_tracks(language=title.language, period_plan=plan)
         self.log.info(
             "Validated Pluto playout: retaining %d of %d periods",
             len(plan.kept), plan.count,

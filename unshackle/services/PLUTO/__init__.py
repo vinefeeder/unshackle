@@ -203,13 +203,14 @@ class PLUTO(Service):
         ])
 
     def get_tracks(self, title: Title_T) -> Tracks:
-        if not isinstance(title, Episode):
-            raise NotImplementedError(
-                "Web stitched DASH movie URL is not yet verified; testing episodes first"
-            )
-        episode_id = str(title.id)
+        if not isinstance(title, (Episode, Movie)):
+            raise TypeError(f"Unsupported Pluto title type: {type(title).__name__}")
+        content_id = str(title.id)
+        # Pluto's VOD stitcher uses an /episode/{id}/ path for content items.
+        # A Movie is an experimental extension: the existing authenticated
+        # endpoint and strict playout/MPD checks are retained.
         manifest_url = self.web_mpd or self.config["endpoints"]["web_mpd"].format(
-            episode_id=episode_id
+            episode_id=content_id
         )
         session_url = self.web_playout or self.config["endpoints"]["web_playout"]
         # Avoid forwarding a bearer JWT to an arbitrary hostname from a CLI override.
@@ -217,7 +218,7 @@ class PLUTO(Service):
         if any(urlparse(url).hostname not in allowed for url in (manifest_url, session_url)):
             raise ValueError("Web playback endpoints must use ipv4.pluto.tv")
 
-        # Fetch the MPD first, establishing this episode's stitched playout,
+        # Fetch the MPD first, establishing this title's stitched playout,
         # and only then retrieve the session's ad schedule.
         response = self.session.get(manifest_url, headers=self._web_headers(), timeout=30)
         response.raise_for_status()
@@ -225,8 +226,8 @@ class PLUTO(Service):
         session_params = None if self.web_playout else {"clientTime": int(time.time())}
         playout = self._get_json(session_url, auth=True, params=session_params)
         plan = plan_playout(dash.manifest, playout)
-        if playout["streamInfo"]["streamID"] != episode_id:
-            raise ValueError("Pluto session JSON belongs to a different episode")
+        if playout["streamInfo"]["streamID"] != content_id:
+            raise ValueError("Pluto session JSON belongs to a different title")
 
         # Pluto interprets its own clips JSON; DASH receives only the
         # service-independent selection plan, not Pluto's advertising schema.

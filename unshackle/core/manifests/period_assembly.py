@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import subprocess
 import shutil
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,10 +127,12 @@ def remux_parts(
 
 
 def concatenate_parts(parts: Sequence[Path], destination: Path, *, ffmpeg: str = "ffmpeg") -> None:
-    """Fast-path concatenation of independently normalized, compatible clear tracks.
+    """Concatenate independently remuxed, compatible clear streams without re-encoding.
 
-    This does NOT repair broken timestamps within an individual part or decrypt it.
-    The concat demuxer rebases boundaries between compatible input containers.
+    Use a real concat script on disk: an input supplied via pipe:0 causes
+    FFmpeg to resolve absolute file entries as pipe:/path and fail with 234.
+    This only rebases *between* independently remuxed periods; it cannot
+    fix corrupt timestamps within an individual part.
     """
     if not parts:
         raise ValueError("No parts available for concatenation")
@@ -137,16 +140,27 @@ def concatenate_parts(parts: Sequence[Path], destination: Path, *, ffmpeg: str =
         if not path.is_file():
             raise FileNotFoundError(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    # Emit a concat demuxer script; paths are escaped for its single-quote grammar.
-    concat_script = "".join(
-        f"file '{str(path.resolve()).replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'\n"
-        for path in parts
-    )
-    subprocess.run(
-        [ffmpeg, "-hide_banner", "-loglevel", "warning", "-f", "concat",
-         "-safe", "0", "-protocol_whitelist", "file,pipe", "-i", "pipe:0",
-         "-map", "0", "-c", "copy", "-y", str(destination)],
-        input=concat_script,
-        text=True,
-        check=True,
-    )
+
+    script_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".ffconcat",
+            prefix="dash_parts_", dir=destination.parent, delete=False,
+        ) as script:
+            script_path = Path(script.name)
+            script.write("ffconcat version 1.0\n")
+            for part in parts:
+                # FFmpeg concat demuxer single-quote escaping:
+                # file '/path/that/has'\\''apostrophe.mp4'
+                quoted = str(part.resolve()).replace("'", "'\\''")
+                script.write(f"file '{quoted}'\n")
+
+        subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "warning",
+             "-f", "concat", "-safe", "0", "-i", str(script_path),
+             "-map", "0", "-c", "copy", "-y", str(destination)],
+            check=True,
+        )
+    finally:
+        if script_path is not None:
+            script_path.unlink(missing_ok=True)

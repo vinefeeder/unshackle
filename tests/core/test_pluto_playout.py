@@ -37,6 +37,23 @@ def test_selects_programme_and_preserves_offsets():
     assert [plan.filter(mpd)(part) for part in mpd] == [False, True, False]
 
 
+def test_allows_nonzero_first_content_offset_with_continuous_following_clips():
+    altered = deepcopy(playout())
+    altered["clips"][0]["clipStartInEpisodeMs"] = 10_000
+    altered["clips"][2]["clipStartInEpisodeMs"] = 11_000
+    plan = plan_playout(manifest(), altered)
+    assert [period.index for period in plan.kept] == [0, 2]
+    assert [period.programme_start_ms for period in plan.kept] == [0, 1000]
+
+
+def test_rejects_discontinuous_offset_after_nonzero_first_content_offset():
+    altered = deepcopy(playout())
+    altered["clips"][0]["clipStartInEpisodeMs"] = 10_000
+    altered["clips"][2]["clipStartInEpisodeMs"] = 12_000
+    with pytest.raises(ValueError, match="expected 11000 ms, got 12000 ms"):
+        plan_playout(manifest(), altered)
+
+
 def test_rejects_stale_ad_schedule():
     altered = deepcopy(playout())
     altered["clips"][1]["endTime"] = "2026-11-21T10:00:04.000Z"

@@ -4,7 +4,7 @@ from copy import deepcopy
 from lxml import etree
 import pytest
 
-from unshackle.services.PLUTO.playout import plan_playout
+from unshackle.services.PLUTO.playout import plan_playout, session_jwt_from_html
 
 
 def playout():
@@ -63,3 +63,25 @@ def test_rejects_unknown_clip_type():
     altered["clips"][1]["type"] = "unknown"
     with pytest.raises(ValueError, match="Unrecognised"):
         plan_playout(manifest(), altered)
+
+
+def test_extract_bootstrap_jwt():
+    html = (
+        '<html><script id="__NEXT_DATA__" type="application/json">'
+        '{"props":{"sessionJwt":"aaa.bbb.ccc"}}'
+        '</script></html>'
+    )
+    assert session_jwt_from_html(html) == "aaa.bbb.ccc"
+
+
+def test_bootstrap_missing_token_is_error():
+    with pytest.raises(ValueError, match="sessionJwt"):
+        session_jwt_from_html(
+            '<script id="__NEXT_DATA__" type="application/json">'
+            '{"props":{}}</script>'
+        )
+
+
+def test_bootstrap_missing_script_is_error():
+    with pytest.raises(ValueError, match="__NEXT_DATA__"):
+        session_jwt_from_html("<html></html>")

@@ -18,6 +18,7 @@ In PLUTO the playout-plan is returned from https://ipv4.pluto.tv/api/tn/
 video/playout//v3/session.json.
 
 For example. 
+```text
            SERVICE-SPECIFIC CODE
         ┌──────────────────────────┐
         │ PLUTO                    │
@@ -37,6 +38,7 @@ For example.
         │ Normalize timestamps     │
         │ Concatenate periods      │
         └──────────────────────────┘
+```
 
 !!! note "Division of responsibility"
     **The service determines which periods belong in the output.** It can use

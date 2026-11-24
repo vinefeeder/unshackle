@@ -153,9 +153,9 @@ class PLUTO(Service):
             match.group("type"), match.group("id"), match.group("episode")
         )
         if kind in ("series", "shows"):
-            # The web catalogue API is inherited from the original Envied
-            # service. For a direct episode, use a clearly-labelled fallback
-            # if catalogue lookup is unavailable in the current region.
+            # Resolve series and episode metadata from the VOD catalogue.
+            # Direct episode URLs may still be downloaded with an explicit
+            # fallback when the catalogue is unavailable in the region.
             url = self.config["endpoints"]["series"].format(season_id=item_id)
             try:
                 data = self._get_json(url)
@@ -164,7 +164,7 @@ class PLUTO(Service):
                         id_=episode["_id"],
                         service=self.__class__,
                         title=data.get("name") or "Pluto TV",
-                        season=int(episode.get("season") or 0),
+                        season=int(season.get("number") or 0),
                         number=int(episode.get("number") or 0),
                         name=episode.get("name"),
                         language="en",
@@ -174,12 +174,19 @@ class PLUTO(Service):
                     for episode in season.get("episodes", [])
                     if not episode_id or episode.get("_id") == episode_id
                 ]
-            except Exception:
+            except Exception as exc:
                 if not episode_id:
                     raise
-                self.log.warning("Web series catalogue unavailable; using direct episode ID")
+                self.log.warning(
+                    "Could not load Pluto series metadata (%s: %s); using direct episode ID",
+                    type(exc).__name__, exc,
+                )
                 episodes = []
             if not episodes and episode_id:
+                self.log.warning(
+                    "Pluto episode %s has no catalogue metadata; filename will use its ID",
+                    episode_id,
+                )
                 episodes = [
                     Episode(
                         id_=episode_id, service=self.__class__,

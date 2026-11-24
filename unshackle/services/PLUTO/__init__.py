@@ -158,7 +158,7 @@ class PLUTO(Service):
             # fallback when the catalogue is unavailable in the region.
             url = self.config["endpoints"]["series"].format(season_id=item_id)
             try:
-                data = self._get_json(url)
+                data = self._get_json(url, auth=True)
                 episodes = [
                     Episode(
                         id_=episode["_id"],

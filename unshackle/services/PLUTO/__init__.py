@@ -7,6 +7,7 @@ Title discovery follows the web APIs used by the earlier service, not Android.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -145,6 +146,40 @@ class PLUTO(Service):
                 url=f"https://pluto.tv/gb_ie/on-demand/{kind}/{item_id}/details",
             )
 
+    def _episode_metadata(self, episode_id: str) -> dict[str, Any]:
+        """Fetch the named episode using Pluto's web GraphQL persisted query."""
+        params = {
+            "operationName": "VideoItemData",
+            "variables": json.dumps(
+                {"contentId": episode_id, "userStatus": "ANONYMOUS"},
+                separators=(",", ":"),
+            ),
+            "extensions": json.dumps(
+                {"tnPersistedDocumentHash": self.config["graphql_video_item_hash"]},
+                separators=(",", ":"),
+            ),
+        }
+        response = self.session.get(
+            self.config["endpoints"]["graphql"],
+            params=params,
+            headers={
+                "User-Agent": self.config["web_user_agent"],
+                "Accept": "application/json",
+                "Referer": self.title,
+                "Origin": "https://pluto.tv",
+                "Apollo-Require-Preflight": "true",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("errors"):
+            raise ValueError(f"Pluto VideoItemData returned GraphQL errors: {payload['errors']}")
+        item = (payload.get("data") or {}).get("videoItem")
+        if not isinstance(item, dict) or item.get("contentId") != episode_id:
+            raise ValueError("Pluto VideoItemData did not return the requested episode")
+        return item
+
     def get_titles(self) -> Titles_T:
         match = re.match(self.TITLE_RE, self.title, re.I)
         if match is None:
@@ -153,47 +188,42 @@ class PLUTO(Service):
             match.group("type"), match.group("id"), match.group("episode")
         )
         if kind in ("series", "shows"):
-            # Resolve series and episode metadata from the VOD catalogue.
-            # Direct episode URLs may still be downloaded with an explicit
-            # fallback when the catalogue is unavailable in the region.
-            url = self.config["endpoints"]["series"].format(season_id=item_id)
-            try:
-                data = self._get_json(url, auth=True)
-                episodes = [
+            if episode_id:
+                item = self._episode_metadata(episode_id)
+                series_title = item.get("seriesTitle") or "Pluto TV"
+                episode_title = item.get("title") or item.get("label") or episode_id
+                episode_title = episode_title.removeprefix(series_title + ": ").strip()
+                return Series([
                     Episode(
-                        id_=episode["_id"],
+                        id_=episode_id,
                         service=self.__class__,
-                        title=data.get("name") or "Pluto TV",
-                        season=int(season.get("number") or 0),
-                        number=int(episode.get("number") or 0),
-                        name=episode.get("name"),
+                        title=series_title,
+                        season=int(item.get("seasonNum") or 0),
+                        number=int(item.get("episodeNum") or 0),
+                        name=episode_title,
                         language="en",
-                        data=episode,
+                        data=item,
                     )
-                    for season in data.get("seasons", [])
-                    for episode in season.get("episodes", [])
-                    if not episode_id or episode.get("_id") == episode_id
-                ]
-            except Exception as exc:
-                if not episode_id:
-                    raise
-                self.log.warning(
-                    "Could not load Pluto series metadata (%s: %s); using direct episode ID",
-                    type(exc).__name__, exc,
+                ])
+
+            # A show-level URL needs a separate season/episode catalogue.
+            # Do not invent a season or episode if that endpoint is unavailable.
+            url = self.config["endpoints"]["series"].format(season_id=item_id)
+            data = self._get_json(url, auth=True)
+            episodes = [
+                Episode(
+                    id_=episode["_id"],
+                    service=self.__class__,
+                    title=data.get("name") or "Pluto TV",
+                    season=int(season.get("number") or 0),
+                    number=int(episode.get("number") or 0),
+                    name=episode.get("name"),
+                    language="en",
+                    data=episode,
                 )
-                episodes = []
-            if not episodes and episode_id:
-                self.log.warning(
-                    "Pluto episode %s has no catalogue metadata; filename will use its ID",
-                    episode_id,
-                )
-                episodes = [
-                    Episode(
-                        id_=episode_id, service=self.__class__,
-                        title="Pluto TV", season=0, number=0,
-                        name=episode_id, language="en",
-                    )
-                ]
+                for season in data.get("seasons", [])
+                for episode in season.get("episodes", [])
+            ]
             if not episodes:
                 raise ValueError("No episodes returned for this Pluto series")
             return Series(episodes)

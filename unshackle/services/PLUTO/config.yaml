@@ -1,0 +1,11 @@
+# Pluto web service (experimental multi-period DASH playback)
+web_user_agent: "Mozilla/5.0 (X11; Linux x86_64; rv:160.0) Gecko/20100101 Firefox/160.0"
+
+endpoints:
+  web_bootstrap: https://pluto.tv/gb_ie
+  search: https://service-media-search.clusters.pluto.tv/v1/search
+  series: https://service-vod.clusters.pluto.tv/v3/vod/series/{season_id}/seasons
+  movie: https://service-vod.clusters.pluto.tv/v4/vod/items?ids={video_id}
+  web_mpd: https://ipv4.pluto.tv/api/tn/video/playout/v2/stitch/dash/episode/{episode_id}/main.mpd
+  web_playout: https://ipv4.pluto.tv/api/tn/video/playout//v3/session.json
+  wv: https://service-concierge.clusters.pluto.tv/v1/wv
